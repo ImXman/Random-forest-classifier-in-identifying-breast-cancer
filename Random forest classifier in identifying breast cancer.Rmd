@@ -1,0 +1,209 @@
+---
+title: "Random forest classifier in identifying breast cancer"
+output: html_document
+---
+
+> Identifying tumors via clinical traits is a hard work and it needs expertise of morphology and physiology. In this tutorial, we will work on building a random forest classifier model and use our model in breast cancer identification based on clinical traits we have trained. 
+
+> Data description
+Attribute Information:
+1. Sample code number: id number
+2. Clump Thickness: 1 - 10
+3. Uniformity of Cell Size: 1 - 10
+4. Uniformity of Cell Shape: 1 - 10
+5. Marginal Adhesion: 1 - 10
+6. Single Epithelial Cell Size: 1 - 10
+7. Bare Nuclei: 1 - 10
+8. Bland Chromatin: 1 - 10
+9. Normal Nucleoli: 1 - 10
+10. Mitoses: 1 - 10
+11. Class: (2 for benign, 4 for malignant)
+
+```{r}
+##read data
+##data resource: http://archive.ics.uci.edu/ml/machine-learning-databases/breast-cancer-wisconsin/breast-cancer-wisconsin.data
+breast = read.csv("Downloads/breast-cancer-wisconsin.data",header = F)
+```
+
+> Attributes from 2 to 10 were already scaled from 1 to 10. Therefore, we don't do any preprocessing. Attribute 11 will be the label in our classfiication problem.
+
+```{r}
+##Next, we random split 20% samples out as test data and leave the rest 80% as training dataset.
+library(dplyr)
+##the whole dataset contains 458 benign samples and 241 malignant samples
+table(breast$V11)
+
+test = sample_frac(breast,0.2)
+train = breast[!breast$V1%in%test$V1,]
+
+##Sometimes class of variables in R is very annoying!
+for (i in c(1:ncol(test))) {
+  test[,i]=as.numeric(test[,i])
+}
+test_x = test[,2:10]
+test_y = test[,11]
+for (i in c(1:ncol(train))) {
+  train[,i]=as.numeric(train[,i])
+}
+train_x = train[,2:10]
+train_y = train[,11]
+```
+
+```{r}
+##We start by building a simple random forest classifier
+library(randomForest)
+set.seed(111)
+simple_rf <- randomForest(train_x,y=as.factor(train_y), importance = TRUE)
+simple_rf
+```
+
+```{r}
+##Then we can use test data to examine how good this classifier model is
+pred_y <- predict(simple_rf, test_x, type = "class")
+table(pred_y,as.factor(test_y))
+```
+
+> Comparing the predicted class with real label, we can conclude this random forest classifier have high accuracy of prediction. However, considering the unequal sample size of the benign and the malignant, we need to have a good way to quantify the model
+
+> Here, we use ROC curve to examine our model
+ROC curve shows the relationship between false positive rate (FP/FP+TN) and false negative rate (TP/FN+TP)
+
+```{r}
+library(ROCR)
+pred_y=as.numeric(as.character(pred_y))
+pred <- prediction(pred_y,test_y)
+rocs <- performance(pred, "tpr", "fpr")
+plot(rocs, col=rainbow(10))
+```
+
+> So far we can be very confident that our model is a very good classifier. High accuracy and good balance balance between false positive rate and false negative rate.
+But since two types of samples are not the same sample size, it is interesting to test classifier performance by unbalanced training set. Furthermore, by adding noise to train set or test set, we also evaluate how the classifier works.
+
+```{r}
+set.seed(111)
+benign = breast[breast$V11==2,]
+malignant = breast[breast$V11==4,]
+benign_train = sample_frac(benign,0.75)
+benign_test = benign[!benign$V1%in%benign_train$V1,]
+malignant_train = sample_frac(malignant,0.25)
+malignant_test = malignant[!malignant$V1%in%malignant_train$V1,]
+test = rbind(benign_test,malignant_test)
+train = rbind(benign_train,malignant_train)
+
+for (i in c(1:ncol(test))) {
+  test[,i]=as.numeric(test[,i])
+}
+test_x = test[,2:10]
+test_y = test[,11]
+for (i in c(1:ncol(train))) {
+  train[,i]=as.numeric(train[,i])
+}
+train_x = train[,2:10]
+train_y = train[,11]
+table(test_y)
+table(train_y)
+```
+
+```{r}
+set.seed(111)
+new_rf <- randomForest(train_x,y=as.factor(train_y), importance = TRUE)
+new_rf
+```
+
+```{r}
+##This time, we simply evaluate the model by checking the accuracy on test data
+pred_y <- predict(new_rf, test_x, type = "class")
+table(pred_y,as.factor(test_y))
+```
+
+> Because of unbalance, the prediction accurary for malignant is more affected than for benign. This is because less malignant samples in the training set and more in test set. This suggests learning of random forest classifier depends on good sample balance in training.
+So the question is what we can do to address possible sample unbalance issue. 
+
+```{r}
+##Here we use cross validation to control training
+library(caret)
+library(e1071)
+set.seed(111)
+##we perform resampling iteration 10 times and set up cp parameter
+numFolds <- trainControl(method = "cv", number = 10)
+cpGrid <- expand.grid(.cp = seq(0.01, 0.5, 0.01))
+caret::train(train_x,as.factor(train_y),method = "rpart", trControl = numFolds,tuneGrid=cpGrid)
+
+##we use the cp that can get most accuracy. In this case, it is 0.01
+cv_rf <- randomForest(train_x,as.factor(train_y), method = "class", cp = 0.01,trControl = numFolds)
+pred_y=predict(cv_rf, test_x, type = "class")
+table(pred_y,as.factor(test_y))
+```
+
+> By using cross validation and parameter tuning, we do get slight improvment on malignant predication. However, we also see a slight less accuracy for benign predication.
+
+> Finally, we will evaluate how tolerant the simple random forest model we made in the first trial is to noisy test set.
+To simplify our evaluation, we define that noise distribution is N(0,0.5), N(0,1), and N(0,10). We won't correct negative values and values larger than 10, this is because we also want to see performance when "wrong" values in the dataset.
+
+```{r}
+##reget test set
+test = sample_frac(breast,0.2)
+for (i in c(1:ncol(test))) {
+  test[,i]=as.numeric(test[,i])
+}
+test_x = test[,2:10]
+test_y = test[,11]
+
+##Noise distribution N(0,0.5)
+test_x_noise=test_x
+for (i in c(1:nrow(test_x))) {
+  test_x_noise[i,]=test_x_noise[i,]+rnorm(9, mean = 0, sd =sqrt(0.5))
+}
+pred_y_noise <- predict(simple_rf, test_x_noise, type = "class")
+table(pred_y_noise,as.factor(test_y))
+
+##Noise distribution N(0,1)
+test_x_noise=test_x
+for (i in c(1:nrow(test_x))) {
+  test_x_noise[i,]=test_x_noise[i,]+rnorm(9, mean = 0, sd =1)
+}
+pred_y_noise <- predict(simple_rf, test_x_noise, type = "class")
+table(pred_y_noise,as.factor(test_y))
+
+##Noise distribution N(0,10)
+test_x_noise=test_x
+for (i in c(1:nrow(test_x))) {
+  test_x_noise[i,]=test_x_noise[i,]+rnorm(9, mean = 0, sd =sqrt(10))
+}
+pred_y_noise <- predict(simple_rf, test_x_noise, type = "class")
+table(pred_y_noise,as.factor(test_y))
+```
+
+> Noise test on test data shows the model is quite robust to noise, and noise starts to affect classification when the variance is scaled up to 10. But what if noise introduced during training? So we apply the noise definition in our training.
+
+```{r}
+##reget training set
+train = breast[!breast$V1%in%test$V1,]
+
+for (i in c(1:ncol(train))) {
+  train[,i]=as.numeric(train[,i])
+}
+train_x = train[,2:10]
+train_y = train[,11]
+
+##Noise distribution N(0,10)
+train_x_noise=train_x
+for (i in c(1:nrow(train_x))) {
+  train_x_noise[i,]=train_x_noise[i,]+rnorm(9, mean = 0, sd =sqrt(10))
+}
+test_x_noise=test_x
+for (i in c(1:nrow(test_x))) {
+  test_x_noise[i,]=test_x_noise[i,]+rnorm(9, mean = 0, sd =sqrt(10))
+}
+
+simple_rf_noise = randomForest(train_x_noise,y=as.factor(train_y), importance = TRUE)
+pred_y_noise <- predict(simple_rf_noise, test_x, type = "class")
+table(pred_y_noise,as.factor(test_y))
+
+##The model still has a good performance even when noise introduced during training, considering test data was also introduced the same type of noise
+```
+
+>SUMMARY
+We were working on classfication problem by using random forest. In this tutorial, we used a "clean" breast cancer dataset on which simple random forest classifier can have good accuracy. But we discussed how to tune a fine model by cross validation and parameter tuning. Finally, we also tested how robust our model is to noise. This blog can serve as simple workflow for building, tuning and evaluting classification model.
+
+
