@@ -1,0 +1,133 @@
+---
+title: "Self building machine learning blocks for cancer classification"
+output: html_document
+---
+
+```{r}
+##libraries
+library(caret)
+library(dplyr)
+library(mltools)
+library(data.table)
+```
+
+```{r}
+##read RNA-seq expression data and preprocessing
+##data availability: https://archive.ics.uci.edu/ml/machine-learning-databases/00401/
+rna = read.csv("TCGA-PANCAN-HiSeq-801x20531/data.csv",header = T,row.names = 1)
+
+##It's a very large dataset with 20531 features. We reduce dimension in three steps
+##1. remove unexressing features
+rna = rna[,colSums(rna>0)>=100]
+##2. remove non-informative features
+vars = apply(rna, 2, var)
+rna = rna[,order(vars,decreasing = T)]
+rna = rna[,1:1914]
+##3. PCA reduction and keep error rate less than 0.1
+pca = prcomp(rna)
+sum(pca$sdev[1:580])/sum(pca$sdev)
+rd_rna = data.frame(pca$x[,1:580])
+##it returns new dataset with 580 features
+
+##read labels
+label = read.csv("TCGA-PANCAN-HiSeq-801x20531/labels.csv",header = T,row.names = 1)
+##convert label to one hot encode
+label_oh <- one_hot(as.data.table(label$Class))
+rownames(label_oh)=rownames(label)
+```
+
+```{r}
+##define macline learning key blocks
+##loss block: cross entropy as loss function
+loss <- function(prob,y){
+  ##cross entropy as loss function
+  ##prob is a list of probability of each class
+  ##y is the one hot true label
+  l=y*log(prob)
+  
+  l[is.na(l)]=0
+  l[l==-Inf]=-1000
+  l[l==Inf]=1000
+  
+  return(sum(-(rowSums(l)))/nrow(y))
+}
+
+##gradient descending
+grad <- function(x,y,w,prob,lr=0.01){
+  
+  ##gradient descending according to loss function
+  dw=t(x)%*%as.matrix((prob-y)/nrow(y))
+  nw=w-lr*dw
+  
+  return(nw)
+}
+
+##training block
+train<-function(x,y,lr=0.01,epch=1000){
+  ##we wil train a linear classifier
+  l = Inf##loss
+  x[,ncol(x)+1]=1
+  ##random uniform initialize weights
+  w = data.frame(runif(ncol(x),0,1))##initialize weights
+  for (i in c(2:ncol(y))){
+    w = cbind(w,runif(ncol(x),0,1))
+  }
+  colnames(w)=colnames(y)
+  w = as.matrix(w)##w has shape of (number of feature,number of class)
+  ##iterate until loss is reasonably small
+  iter=0
+  while (iter<epch) {
+    iter=iter+1
+    score = as.matrix(x)%*%w
+    ##use softmax function
+    score_exp = exp(score)
+    score_sum = rowSums(score_exp)
+    prob = score_exp/score_sum##probability
+  
+    l = loss(prob,y)##calculate loss
+    #print(paste(paste("loss of iteration ",iter,sep = ""),l,sep=":"))
+    w = grad(x=x,y=y,w=w,prob = prob, lr = lr)##update weights
+  }
+  return(w)
+}
+
+##testing or prediction block
+pred <- function(x,w){
+  x[,ncol(x)+1]=1
+  score = as.matrix(x)%*%w
+  ##use softmax function
+  score = exp(score)
+  sums = rowSums(score)
+  score = score/sums##probability
+  labels = apply(score, 1, which.max)
+  return(labels)
+}
+```
+
+```{r}
+##group blocks to cancer type classfication
+x_tr = sample_frac(rd_rna,0.75)
+x_te = rd_rna[!rownames(rd_rna)%in%rownames(x_tr),]
+y_tr = label_oh[rownames(label_oh)%in%rownames(x_tr),]
+y_te = label_oh[!rownames(label_oh)%in%rownames(x_tr),]
+
+##random weights
+w = data.frame(runif(ncol(x_tr)+1,0,1))
+for (i in c(2:ncol(y_tr))){
+  w = cbind(w,runif(ncol(x_tr)+1,0,1))
+}
+colnames(w)=colnames(y_tr)
+w = as.matrix(w)
+##evaluation before training
+y_pred = pred(x = x_te,w = w)
+y_te = apply(y_te, 1, which.max)
+cfm_b=confusionMatrix(as.factor(y_te),as.factor(y_pred))
+
+
+##training softmax linear classifier
+w = train(x = x_tr,y=y_tr,lr = 0.01,epch = 1000)
+
+##predication
+y_pred = pred(x = x_te,w = w)
+cfm_a=confusionMatrix(as.factor(y_te),as.factor(y_pred))
+```
